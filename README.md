@@ -1,5 +1,5 @@
 
-# ASTA - Astronomical Source Tracking and Analysis
+# ASTA - Automated Satellite Tracking for Astronomy)
 
 ASTA is a tool designed for detecting and analyzing astronomical trails in images using deep learning and image processing techniques.
 
