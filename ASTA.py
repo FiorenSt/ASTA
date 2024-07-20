@@ -440,8 +440,8 @@ if __name__ == "__main__":
 
     if os.path.exists(args.fits_file_path):
         with fits.open(args.fits_file_path) as hdul:
-            header = hdul[1].header
-            full_field_image = hdul[1].data
+            header = hdul[-1].header
+            full_field_image = hdul[-1].data
 
         binary_img, df, predicted_mask, times = processor.process_image(
             full_field_image, header, unet_threshold=args.unet_threshold,
