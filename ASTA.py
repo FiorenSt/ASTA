@@ -10,6 +10,7 @@ from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
 import pandas as pd
 import argparse
+import time
 
 class ASTA:
     def __init__(self, model_path):
@@ -177,65 +178,57 @@ class ASTA:
         tuple: World coordinates (RA, DEC) or (nan, nan) if conversion fails.
         """
         try:
-            # Attempt to convert pixel to world coordinates
             ra_dec = wcs.pixel_to_world(x, y)
-            # Ensure ra_dec is a SkyCoord object and not a list
             if isinstance(ra_dec, SkyCoord):
                 return ra_dec.ra.degree, ra_dec.dec.degree
             else:
-                # Handle unexpected ra_dec types (e.g., lists) if necessary
                 print(f"Unexpected type for ra_dec: {type(ra_dec)}")
                 return np.nan, np.nan
         except Exception as e:
-            # In case of any error, return np.nan
             print(f"Error converting pixel to world coordinates: {e}")
             return np.nan, np.nan
 
-    def process_image(self, fits_file_path, area_threshold=3000, unet_threshold=0.75, min_size=500, patch_size=528, save_predicted_mask=False):
+    def process_image(self, full_field_image, header, area_threshold=3000, unet_threshold=0.75, min_size=500, patch_size=528, save_predicted_mask=False, time_processing=False):
         """
         Processes a FITS file to detect trails using a pre-trained model and various image processing techniques.
 
         Parameters:
-        fits_file_path (str): Path to the FITS file.
+        full_field_image (numpy.ndarray): Full field image data.
+        header (astropy.io.fits.Header): FITS header.
         area_threshold (int): Minimum area of contours to keep.
         unet_threshold (float): Threshold for the predicted mask.
         min_size (int): Minimum size of objects to keep.
         patch_size (int): Size of the patches for processing.
         save_predicted_mask (bool): Whether to save the predicted mask.
+        time_processing (bool): Whether to time the processing steps.
 
         Returns:
         tuple: Binary mask, DataFrame with results, and optionally the full predicted mask.
         """
-        if not os.path.exists(fits_file_path):
-            print(f"FITS file {fits_file_path} does not exist.")
-            return None, None, None
+        times = {}
 
-        with fits.open(fits_file_path) as hdul:
-            header = hdul[1].header
-            wcs = WCS(header)
-            fieldID = header.get('OBJECT', np.nan)
-            date = header.get('DATE-OBS', np.nan)
-            ra = header.get('RA-CNTR', np.nan)
-            dec = header.get('DEC-CNTR', np.nan)
-            image_flag = header.get('QC-FLAG', np.nan)
-            full_field_image = hdul[1].data
+        if time_processing:
+            start_time = time.time()
 
-        # Skip processing if the image_flag is 'red'
-        if image_flag == 'red':
-            print(f"Skipping {fits_file_path} due to 'red' flag.")
-            return None, None, None
+        wcs = WCS(header)
+        fieldID = header.get('OBJECT', np.nan)
+        date = header.get('DATE-OBS', np.nan)
+        ra = header.get('RA-CNTR', np.nan)
+        dec = header.get('DEC-CNTR', np.nan)
+        image_flag = header.get('QC-FLAG', np.nan)
 
-        results = {
-            "Image": [], "FieldID": [], "ImageRA": [], "ImageDEC": [], "ImageFlag": [], "Date": [],
-            "StartX": [], "StartY": [], "EndX": [], "EndY": [], "StartRA": [], "StartDEC": [],
-            "EndRA": [], "EndDEC": [], "Quantile25": [], "Quantile50": [], "Quantile75": []
-        }
-
-        hough_params = {'rho': 1, 'theta': np.pi / 180, 'threshold': 50, 'minLineLength': 100, 'maxLineGap': 250}
+        if time_processing:
+            start_preprocessing_time = time.time()
 
         image_mean = np.mean(full_field_image)
         image_std = np.std(full_field_image)
         full_field_image_standardized = (full_field_image - image_mean) / image_std
+
+        if time_processing:
+            times["preprocessing"] = time.time() - start_preprocessing_time
+
+        if time_processing:
+            start_prediction_time = time.time()
 
         # Initialize the full predicted mask
         full_predicted_mask = np.zeros((10560, 10560))
@@ -259,8 +252,16 @@ class ASTA:
         for idx, (i, j) in enumerate(batch_indices):
             full_predicted_mask[i:i + patch_size, j:j + patch_size] = batch_predictions[idx]
 
+        if time_processing:
+            times["prediction"] = time.time() - start_prediction_time
+
         full_predicted_mask_threshold = self.apply_threshold(full_predicted_mask, unet_threshold)
         binary_image = full_predicted_mask_threshold.astype(np.uint8)
+
+        if time_processing:
+            start_hough_time = time.time()
+
+        hough_params = {'rho': 1, 'theta': np.pi / 180, 'threshold': 50, 'minLineLength': 100, 'maxLineGap': 250}
 
         # Hough Line detection with provided parameters
         lines = cv2.HoughLinesP(binary_image, hough_params['rho'], hough_params['theta'],
@@ -273,10 +274,22 @@ class ASTA:
                 x1, y1, x2, y2 = line[0]
                 cv2.line(binary_image, (x1, y1), (x2, y2), (1, 0, 0), 1)
 
+        if time_processing:
+            times["hough_transform"] = time.time() - start_hough_time
+
+        if time_processing:
+            start_contour_time = time.time()
+
         binary_image = self.connect_trails(binary_image.astype(np.uint8), kernel_size=2)
         binary_image = self.remove_small_objects(binary_image, min_size=min_size)
 
         contours, _ = cv2.findContours(binary_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        results = {
+            "Image": [], "FieldID": [], "ImageRA": [], "ImageDEC": [], "ImageFlag": [], "Date": [],
+            "StartX": [], "StartY": [], "EndX": [], "EndY": [], "StartRA": [], "StartDEC": [],
+            "EndRA": [], "EndDEC": [], "Quantile25": [], "Quantile50": [], "Quantile75": []
+        }
 
         for contour in contours:
             contour_area = cv2.contourArea(contour)
@@ -330,7 +343,7 @@ class ASTA:
                             start_ra, start_dec = self.safe_pixel_to_world(wcs, start_point[0], start_point[1])
                             end_ra, end_dec = self.safe_pixel_to_world(wcs, end_point[0], end_point[1])
 
-                            results["Image"].append(os.path.basename(fits_file_path))
+                            results["Image"].append(np.nan)
                             results["FieldID"].append(fieldID)
                             results["Date"].append(date)
                             results["ImageRA"].append(ra)
@@ -348,33 +361,17 @@ class ASTA:
                             results["Quantile50"].append(quantiles[1])
                             results["Quantile75"].append(quantiles[2])
 
-        if not any(len(v) > 0 for v in results.values()):
-            results = {
-                "Image": [os.path.basename(fits_file_path)],
-                "FieldID": [fieldID],
-                "Date": [date],
-                "ImageRA": [ra],
-                "ImageDEC": [dec],
-                "ImageFlag": [image_flag],
-                "StartX": [np.nan],
-                "StartY": [np.nan],
-                "EndX": [np.nan],
-                "EndY": [np.nan],
-                "StartRA": [np.nan],
-                "StartDEC": [np.nan],
-                "EndRA": [np.nan],
-                "EndDEC": [np.nan],
-                "Quantile25": [np.nan],
-                "Quantile50": [np.nan],
-                "Quantile75": [np.nan],
-            }
-
         results_df = pd.DataFrame.from_dict(results)
         binary_image = self.remove_small_objects(binary_image, min_size=min_size)
 
+        if time_processing:
+            times["contour_analysis"] = time.time() - start_contour_time
+            times["total"] = time.time() - start_time
+
         if save_predicted_mask:
-            return binary_image, results_df, full_predicted_mask
-        return binary_image, results_df, None
+            return binary_image, results_df, full_predicted_mask, times if time_processing else None
+
+        return binary_image, results_df, None, times if time_processing else None
 
     def save_results(self, results_df, base_filename, csv_output_dir, image_output_dir, save_mask=False,
                      mask_image=None, save_predicted_mask=False, predicted_mask=None):
@@ -426,22 +423,40 @@ class ASTA:
             print(f"Predicted mask image saved to {predicted_mask_filename}")
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(description="Process an astronomical image to detect trails.")
     parser.add_argument("model_path", type=str, help="Path to the trained model file.")
     parser.add_argument("fits_file_path", type=str, help="Path to the FITS file to process.")
+    parser.add_argument("--unet_threshold", type=float, default=0.5, help="Threshold for the predicted mask.")
     parser.add_argument("--save", action="store_true", help="Save the results DataFrame to a CSV file.")
     parser.add_argument("--save_mask", action="store_true", help="Save the mask image as a PNG file.")
     parser.add_argument("--save_predicted_mask", action="store_true", help="Save the predicted mask image as a PNG file.")
     parser.add_argument("--csv_output_dir", type=str, default=".", help="Directory to save the results CSV file.")
     parser.add_argument("--image_output_dir", type=str, default=".", help="Directory to save the mask image.")
+    parser.add_argument("--time_processing", action="store_true", help="Time the processing steps.")
 
     args = parser.parse_args()
 
     processor = ASTA(args.model_path)
-    binary_img, df, predicted_mask = processor.process_image(args.fits_file_path, unet_threshold=0.5, save_predicted_mask=args.save_predicted_mask)
 
-    if args.save:
-        base_filename = os.path.splitext(os.path.basename(args.fits_file_path))[0]
-        processor.save_results(df, base_filename, args.csv_output_dir, args.image_output_dir, save_mask=args.save_mask,
-                               mask_image=binary_img, save_predicted_mask=args.save_predicted_mask, predicted_mask=predicted_mask)
+    if os.path.exists(args.fits_file_path):
+        with fits.open(args.fits_file_path) as hdul:
+            header = hdul[1].header
+            full_field_image = hdul[1].data
+
+        binary_img, df, predicted_mask, times = processor.process_image(
+            full_field_image, header, unet_threshold=args.unet_threshold,
+            save_predicted_mask=args.save_predicted_mask, time_processing=args.time_processing
+        )
+
+        if args.time_processing:
+            print("Processing times:", times)
+
+        if args.save:
+            base_filename = os.path.splitext(os.path.basename(args.fits_file_path))[0]
+            processor.save_results(
+                df, base_filename, args.csv_output_dir, args.image_output_dir,
+                save_mask=args.save_mask, mask_image=binary_img,
+                save_predicted_mask=args.save_predicted_mask, predicted_mask=predicted_mask
+            )
+    else:
+        print(f"FITS file {args.fits_file_path} does not exist.")
