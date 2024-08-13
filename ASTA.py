@@ -224,14 +224,9 @@ class ASTA:
         image_std = np.std(full_field_image)
         full_field_image_standardized = (full_field_image - image_mean) / image_std
 
-        if time_processing:
-            times["preprocessing"] = time.time() - start_preprocessing_time
-
-        if time_processing:
-            start_prediction_time = time.time()
 
         # Initialize the full predicted mask
-        full_predicted_mask = np.zeros((10560, 10560))
+        full_predicted_mask = np.zeros_like(full_field_image)
 
         # Accumulate patches in a batch
         batch_patches = []
@@ -244,6 +239,13 @@ class ASTA:
 
         # Convert list to numpy array
         batch_patches = np.array(batch_patches)
+
+        if time_processing:
+            times["preprocessing"] = time.time() - start_preprocessing_time
+
+        if time_processing:
+            start_prediction_time = time.time()
+
 
         # Predict on the whole batch
         batch_predictions = self.predict_on_batch(batch_patches)
@@ -401,26 +403,17 @@ class ASTA:
         print(f"Results saved to {csv_filename}")
 
         if save_mask and mask_image is not None:
-            if mask_image.shape != (10560, 10560):
-                resized_mask = cv2.resize(mask_image, (10560, 10560), interpolation=cv2.INTER_NEAREST)
-            else:
-                resized_mask = mask_image
-
-            resized_mask_uint8 = (resized_mask * 255).astype(np.uint8)
             mask_filename = os.path.join(image_output_dir, f"{base_filename}_mask.png")
-            cv2.imwrite(mask_filename, resized_mask_uint8)
+            mask_image_uint8 = (mask_image * 255).astype(np.uint8)
+            cv2.imwrite(mask_filename, mask_image_uint8)
             print(f"Mask image saved to {mask_filename}")
 
         if save_predicted_mask and predicted_mask is not None:
-            if predicted_mask.shape != (10560, 10560):
-                resized_predicted_mask = cv2.resize(predicted_mask, (10560, 10560), interpolation=cv2.INTER_NEAREST)
-            else:
-                resized_predicted_mask = predicted_mask
-
-            resized_predicted_mask_uint8 = (resized_predicted_mask * 255).astype(np.uint8)
             predicted_mask_filename = os.path.join(image_output_dir, f"{base_filename}_predicted_mask.png")
-            cv2.imwrite(predicted_mask_filename, resized_predicted_mask_uint8)
+            predicted_mask_uint8 = (predicted_mask * 255).astype(np.uint8)
+            cv2.imwrite(predicted_mask_filename, predicted_mask_uint8)
             print(f"Predicted mask image saved to {predicted_mask_filename}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process an astronomical image to detect trails.")
