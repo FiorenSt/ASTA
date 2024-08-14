@@ -1,4 +1,7 @@
-# ASTA - Automated Satellite Tracking for Astronomy
+![ASTA Title Image](https://see.fontimg.com/api/renderfont4/KpAp/eyJyIjoiZnMiLCJoIjoxMTksInciOjEwMDAsImZzIjoxMTksImZnYyI6IiM4QTAyMDIiLCJiZ2MiOiIjRkZGRkZGIiwidCI6MX0/QVNUQQ/kg-second-chances-sketch.png)
+
+# Automated Satellite Tracking for Astronomy
+
 
 ASTA is a tool designed for detecting and analyzing astronomical trails in images using deep learning and image processing techniques.
 
