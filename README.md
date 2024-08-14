@@ -1,4 +1,3 @@
-
 # ASTA - Automated Satellite Tracking for Astronomy
 
 ASTA is a tool designed for detecting and analyzing astronomical trails in images using deep learning and image processing techniques.
@@ -14,7 +13,7 @@ ASTA is a tool designed for detecting and analyzing astronomical trails in image
 
 1. Clone the repository:
     ```sh
-    git clone https://github.com/yourusername/asta.git
+    git clone https://github.com/FiorenSt/asta.git
     cd asta
     ```
 
@@ -31,17 +30,21 @@ Run the ASTA tool from the command line to process astronomical images:
 python asta.py <model_path> <fits_file_path> [options]
 ```
 
-Options:
+### Options:
+
+- `--unet_threshold <float>`: Set the threshold for the U-Net predicted mask (default: 0.5).
 - `--save`: Save the results DataFrame to a CSV file.
-- `--save_mask`: Save the mask image as a PNG file.
+- `--save_mask`: Save the binary mask image as a PNG file.
 - `--save_predicted_mask`: Save the predicted mask image as a PNG file.
 - `--csv_output_dir <dir>`: Directory to save the results CSV file (default: current directory).
-- `--image_output_dir <dir>`: Directory to save the mask image (default: current directory).
+- `--image_output_dir <dir>`: Directory to save mask images (default: current directory).
+- `--time_processing`: Output processing time for each step.
+
 
 ### Example
 
 ```sh
-python asta.py model.h5 sample.fits --save --save_mask --save_predicted_mask --csv_output_dir results/csv --image_output_dir results/images
+python asta.py model.h5 sample.fits --unet_threshold 0.75 --save --save_mask --save_predicted_mask --csv_output_dir results/csv --image_output_dir results/images
 ```
 
 ## Contributing
