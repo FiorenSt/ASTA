@@ -1,5 +1,6 @@
 from sklearn.cluster import DBSCAN
 from scipy.spatial.distance import pdist, squareform
+from scipy.ndimage import binary_dilation
 import numpy as np
 import os
 import cv2
@@ -188,7 +189,48 @@ class ASTA:
             print(f"Error converting pixel to world coordinates: {e}")
             return np.nan, np.nan
 
-    def process_image(self, full_field_image, header, area_threshold=3000, unet_threshold=0.75, min_size=500, patch_size=528, save_predicted_mask=False, time_processing=False):
+    def extract_local_background(self, trail_mask, image_data, dilation_size=21):
+        """
+        Extracts local background pixels around the trail using dilation.
+
+        Parameters:
+        trail_mask (numpy.ndarray): Binary mask of the trail (1 for trail, 0 for background)
+        image_data (numpy.ndarray): Full image data
+        dilation_size (int): Size of dilation for finding local background
+
+        Returns:
+        numpy.ndarray: Local background pixel values
+        """
+        # Dilate the trail mask to get the surrounding region
+        kernel = np.ones((dilation_size, dilation_size), np.uint8)
+        dilated_mask = cv2.dilate(trail_mask.astype(np.uint8), kernel, iterations=1)
+        local_background_mask = (dilated_mask > 0) & (trail_mask == 0)
+        local_background_pixels = image_data[local_background_mask]
+        return local_background_pixels
+
+    def estimate_width_from_contour_fitting(self, contour):
+        """
+        Estimates the width of an object represented by a contour by fitting a rotated rectangle
+        (minimum-area bounding box) around the contour.
+
+        Parameters:
+        ----------
+        contour : numpy.ndarray
+            The contour of the object, typically obtained from functions like `cv2.findContours`.
+            It represents the boundary of the object in pixel coordinates.
+
+        Returns:
+        -------
+        width : float
+            The estimated width of the object, defined as the smaller of the two dimensions (width or height)
+            of the fitted bounding box around the contour.
+        """
+
+        rect = cv2.minAreaRect(contour)
+        width = min(rect[1])  # The smaller dimension is the width
+        return width
+
+    def process_image(self, full_field_image, header, area_threshold=3000, unet_threshold=0.58, min_size=500, patch_size=528, save_predicted_mask=False, time_processing=False):
         """
         Processes a FITS file to detect trails using a pre-trained model and various image processing techniques.
 
@@ -211,6 +253,7 @@ class ASTA:
             start_time = time.time()
 
         wcs = WCS(header)
+        image_name = header.get('MASKFILE', np.nan)
         fieldID = header.get('OBJECT', np.nan)
         date = header.get('DATE-OBS', np.nan)
         ra = header.get('RA-CNTR', np.nan)
@@ -274,7 +317,7 @@ class ASTA:
         if lines is not None:
             for line in lines:
                 x1, y1, x2, y2 = line[0]
-                cv2.line(binary_image, (x1, y1), (x2, y2), (1, 0, 0), 1)
+                cv2.line(binary_image, (x1, y1), (x2, y2), 255, thickness=1)
 
         if time_processing:
             times["hough_transform"] = time.time() - start_hough_time
@@ -282,7 +325,7 @@ class ASTA:
         if time_processing:
             start_contour_time = time.time()
 
-        binary_image = self.connect_trails(binary_image.astype(np.uint8), kernel_size=2)
+        binary_image = self.connect_trails(binary_image.astype(np.uint8), kernel_size=3)
         binary_image = self.remove_small_objects(binary_image, min_size=min_size)
 
         contours, _ = cv2.findContours(binary_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -290,7 +333,8 @@ class ASTA:
         results = {
             "Image": [], "FieldID": [], "ImageRA": [], "ImageDEC": [], "ImageFlag": [], "Date": [],
             "StartX": [], "StartY": [], "EndX": [], "EndY": [], "StartRA": [], "StartDEC": [],
-            "EndRA": [], "EndDEC": [], "Quantile25": [], "Quantile50": [], "Quantile75": []
+            "EndRA": [], "EndDEC": [], "Quantile25": [], "Quantile50": [], "Quantile75": [],
+            "SNR": [], "Length": [], "Width": []
         }
 
         for contour in contours:
@@ -322,7 +366,7 @@ class ASTA:
                     cluster_mask = np.zeros_like(mask, dtype=np.uint8)
                     for line in cluster_lines:
                         x1, y1, x2, y2 = line
-                        cv2.line(cluster_mask, (x1, y1), (x2, y2), 1, thickness=2)
+                        cv2.line(cluster_mask, (x1, y1), (x2, y2), 1, thickness=1)
 
                     cluster_contours, _ = cv2.findContours(cluster_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     for cl_contour in cluster_contours:
@@ -345,7 +389,36 @@ class ASTA:
                             start_ra, start_dec = self.safe_pixel_to_world(wcs, start_point[0], start_point[1])
                             end_ra, end_dec = self.safe_pixel_to_world(wcs, end_point[0], end_point[1])
 
-                            results["Image"].append(np.nan)
+                            # SNR Calculation for the trail
+                            local_background_pixels = self.extract_local_background(contour_line_mask, full_field_image,
+                                                                                    dilation_size=21)
+                            # Filter trail pixels to exclude extreme outliers
+                            low_percentile, high_percentile = np.percentile(trail_pixels, [1.5, 98.5])
+                            filtered_trail_pixels = trail_pixels[
+                                (trail_pixels >= low_percentile) & (trail_pixels <= high_percentile)]
+
+                            # Filter background pixels in the same way
+                            low_back_percentile, high_back_percentile = np.percentile(local_background_pixels, [1.5, 98.5])
+                            filtered_back_pixels = local_background_pixels[
+                                (local_background_pixels >= low_back_percentile) &
+                                (local_background_pixels <= high_back_percentile)]
+
+                            # Calculate total flux and SNR using filtered pixels
+                            tot_sat_flux = np.sum(filtered_trail_pixels)
+                            N_sat_pix = len(filtered_trail_pixels)
+                            std_backg_flux = np.std(filtered_back_pixels)
+
+                            # Length Estimation (Euclidean distance between start and end points)
+                            length = np.sqrt(
+                                (start_point[0] - end_point[0]) ** 2 + (start_point[1] - end_point[1]) ** 2)
+
+                            # Width Estimation using the contour fitting method
+                            width = self.estimate_width_from_contour_fitting(cl_contour)
+
+                            # Calculate unit SNR
+                            total_snr = (tot_sat_flux / np.sqrt(tot_sat_flux + N_sat_pix * (std_backg_flux**2))) / length
+
+                            results["Image"].append(image_name)
                             results["FieldID"].append(fieldID)
                             results["Date"].append(date)
                             results["ImageRA"].append(ra)
@@ -362,6 +435,9 @@ class ASTA:
                             results["Quantile25"].append(quantiles[0])
                             results["Quantile50"].append(quantiles[1])
                             results["Quantile75"].append(quantiles[2])
+                            results["SNR"].append(total_snr)
+                            results["Length"].append(length)
+                            results["Width"].append(width)
 
         results_df = pd.DataFrame.from_dict(results)
         binary_image = self.remove_small_objects(binary_image, min_size=min_size)
@@ -419,7 +495,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process an astronomical image to detect trails.")
     parser.add_argument("model_path", type=str, help="Path to the trained model file.")
     parser.add_argument("fits_file_path", type=str, help="Path to the FITS file to process.")
-    parser.add_argument("--unet_threshold", type=float, default=0.5, help="Threshold for the predicted mask.")
+    parser.add_argument("--unet_threshold", type=float, default=0.58, help="Threshold for the predicted mask.")
     parser.add_argument("--save", action="store_true", help="Save the results DataFrame to a CSV file.")
     parser.add_argument("--save_mask", action="store_true", help="Save the mask image as a PNG file.")
     parser.add_argument("--save_predicted_mask", action="store_true", help="Save the predicted mask image as a PNG file.")
